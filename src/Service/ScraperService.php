@@ -7,7 +7,6 @@ namespace App\Service;
 use App\Entity\Kenteken;
 use App\Repository\KentekenRepository;
 use Carbon\Carbon;
-use Doctrine\Persistence\ObjectManager;
 use Exception;
 use Goutte\Client;
 
@@ -59,64 +58,64 @@ class ScraperService
 
     public function getLicensePlateDetails(string $licensePlate): string
     {
-        $kenteken = new Kenteken();
-        $kenteken->setKenteken($licensePlate);
+        $entity = new Kenteken();
+        $entity->setKenteken($licensePlate);
 
         try {
-            $filteredRows = $this->scrapeData($licensePlate, $kenteken);
+            $text = $this->requestLicensePlateDetails($licensePlate);
+            $entity->setOutput($text);
         } catch (Exception $e) {
-            $kenteken->setOutput($e->getMessage());
-            $this->kentekenRepository->save($kenteken);
+            $entity->setOutput($e->getMessage());
+            $entity->setConnection(false);
             return $e->getMessage();
+        } finally {
+            $this->kentekenRepository->save($entity);
         }
-
-        $this->rawData = $this->createKeyValueMap($filteredRows);
-        $this->calculateTimeInOwnership();
-
-        $this->rawData['Omschrijving'] = $this->rawData['Modelomschrijving'] ?? $this->rawData['Model'];
-        $this->rawData['Jaar'] = Carbon::parseFromLocale($this->rawData['Datum eerste toelating'], 'nl_NL')->year;
-        
-        $text = $this->buildString($kenteken);
-        $this->kentekenRepository->save($kenteken);
 
         return $text;
     }
 
     /**
+     * @throws Exception
+     */
+    public function requestLicensePlateDetails(string $licensePlate): string
+    {
+        $filteredRows = $this->scrapeData($licensePlate);
+
+        $this->rawData = $this->createKeyValueMap($filteredRows);
+
+        $this->rawData['In bezit eigenaar'] = $this->calculateTimeInOwnership();
+        $this->rawData['Omschrijving'] = $this->rawData['Modelomschrijving'] ?? $this->rawData['Model'];
+        $this->rawData['Jaar'] = Carbon::parseFromLocale($this->rawData['Datum eerste toelating'], 'nl_NL')->year;
+
+        return $this->buildString();
+    }
+
+    /**
      * @param string $licensePlate
-     * @param Kenteken $kenteken
      * @return array
      * @throws Exception
      */
-    private function scrapeData(string $licensePlate, Kenteken $kenteken): array
+    private function scrapeData(string $licensePlate): array
     {
         $client = new Client();
         $response = $client->request('GET', 'https://www.autoweek.nl/kentekencheck/' . $licensePlate);
 
         if ($response === null) {
-            $kenteken->setConnection(false);
             throw new Exception('Er is iets fout gegaan');
         }
 
         $check = $response->filter('div.inner-l-contents')->text();
 
-        if (str_starts_with($check, 'Het kenteken bestaat niet') ){
-            $kenteken->setConnection(false);
+        if (str_starts_with($check, 'Het kenteken bestaat niet')) {
             throw new Exception('Kenteken bestaat niet of is foutief');
         } else if (str_starts_with($check, 'Het kenteken-formaat klopt niet')) {
-            $kenteken->setConnection(false);
             throw new Exception('Het kenteken-formaat klopt niet');
         }
-
-        $kenteken->setConnection(true);
 
         return $response->filter('td')->each(static fn($row) => $row->text());
     }
 
-    /**
-     * @param array $filteredRows
-     * @return array
-     */
     private function createKeyValueMap(array $filteredRows): array
     {
         $unevenRows = array_filter($filteredRows, static fn($index) => $index % 2 !== 0, ARRAY_FILTER_USE_KEY);
@@ -124,17 +123,13 @@ class ScraperService
         return array_intersect_key(array_combine($evenRows, $unevenRows), array_flip($this->relevant));
     }
 
-    private function calculateTimeInOwnership(): void
+    private function calculateTimeInOwnership(): int
     {
         $date = Carbon::parseFromLocale($this->rawData['Datum laatste tenaamstelling'], 'nl_NL');
-        $this->rawData['In bezit eigenaar'] = $date->diffInDays(Carbon::now());
+        return $date->diffInDays(Carbon::now());
     }
 
-    /**
-     * @param Kenteken $kenteken
-     * @return string
-     */
-    private function buildString(Kenteken $kenteken): string
+    private function buildString(): string
     {
         $data = array_intersect_key($this->rawData, array_flip($this->textKeys));
 
@@ -149,8 +144,6 @@ class ScraperService
         $text .= "Het schakelen gaat ${data['Schakeling']} met een top van ${data['Topsnelheid']}. ";
         $text .= "Dit doet hij in ${data['Acceleratie 0-100 km/h']} met een gewicht van ${data['Massa leeg']}. ";
         $text .= "De ${data['Aantal eigenaren']}e eigenaar heeft hem ${data['In bezit eigenaar']} dagen in bezit.";
-
-        $kenteken->setOutput($text);
 
         return $text;
     }
