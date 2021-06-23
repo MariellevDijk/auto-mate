@@ -66,6 +66,7 @@ class ScraperService
             $filteredRows = $this->scrapeData($licensePlate, $kenteken);
         } catch (Exception $e) {
             $kenteken->setOutput($e->getMessage());
+            $this->kentekenRepository->save($kenteken);
             return $e->getMessage();
         }
 
